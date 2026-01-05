@@ -1,0 +1,170 @@
+const express = require("express");
+const axios = require("axios");
+const crypto = require("crypto");
+
+const app = express();
+app.use(express.json());
+
+const SECRET = process.env.CHANNEL_SECRET;
+const TOKEN  = process.env.ACCESS_TOKEN;
+
+// ===== 設定 =====
+const ADMINS = new Set([
+  "Uxxxxxxxxxxxxxxxxxxxx"
+]);
+
+const MAX_HISTORY = 5;
+const DEFAULT_MUTE = 60 * 1000;
+
+// userId → { muteUntil }
+const users = new Map();
+// openChatId → [userId, ...]
+const history = new Map();
+
+// ===== 共通 =====
+function verify(req) {
+  const sig = req.headers["x-line-signature"];
+  const body = JSON.stringify(req.body);
+  const hash = crypto.createHmac("SHA256", SECRET).update(body).digest("base64");
+  return sig === hash;
+}
+
+function isAdmin(userId) {
+  return ADMINS.has(userId);
+}
+
+async function reply(token, text) {
+  await axios.post(
+    "https://api.line.me/v2/bot/message/reply",
+    {
+      replyToken: token,
+      messages: [{ type: "text", text }]
+    },
+    { headers: { Authorization: `Bearer ${TOKEN}` } }
+  );
+}
+
+// ===== Webhook =====
+app.post("/webhook", async (req, res) => {
+  if (!verify(req)) return res.sendStatus(403);
+
+  for (const e of req.body.events) {
+    if (
+      e.type !== "message" ||
+      e.message.type !== "text" ||
+      e.source.type !== "openchat"
+    ) continue;
+
+    const userId = e.source.userId;
+    const chatId = e.source.openChatId;
+    const text = e.message.text;
+    const now = Date.now();
+
+    if (!users.has(userId)) users.set(userId, { muteUntil: 0 });
+
+    /* ===== 管理者：直近発言者一覧 ===== */
+    if (text === "/list") {
+      if (!isAdmin(userId)) {
+        await reply(e.replyToken, "⛔ 権限がありません");
+        continue;
+      }
+
+      const list = history.get(chatId) || [];
+      if (list.length === 0) {
+        await reply(e.replyToken, "履歴がありません");
+        continue;
+      }
+
+      let msg = "📋 直近の発言者\n";
+      list.forEach((uid, i) => {
+        msg += `${i + 1}. ${uid}\n`;
+      });
+
+      await reply(e.replyToken, msg);
+      continue;
+    }
+
+    /* ===== 管理者：ミュート ===== */
+    if (text.startsWith("/mute")) {
+      if (!isAdmin(userId)) {
+        await reply(e.replyToken, "⛔ 権限がありません");
+        continue;
+      }
+
+      const parts = text.split(" ");
+      const seconds = parseInt(parts[parts.length - 1], 10);
+      const duration = isNaN(seconds) ? DEFAULT_MUTE : seconds * 1000;
+
+      const targets = parts
+        .slice(1, isNaN(seconds) ? parts.length : parts.length - 1)
+        .map(n => parseInt(n, 10) - 1)
+        .filter(i => !isNaN(i));
+
+      const list = history.get(chatId) || [];
+      if (targets.length === 0 || list.length === 0) {
+        await reply(e.replyToken, "⚠️ 対象がありません");
+        continue;
+      }
+
+      targets.forEach(i => {
+        const tid = list[i];
+        if (tid && users.has(tid)) {
+          users.get(tid).muteUntil = now + duration;
+        }
+      });
+
+      await reply(
+        e.replyToken,
+        `🔇 ${targets.length}人を ${duration / 1000} 秒ミュートしました`
+      );
+      continue;
+    }
+
+    /* ===== 管理者：ミュート解除 ===== */
+    if (text.startsWith("/unmute")) {
+      if (!isAdmin(userId)) {
+        await reply(e.replyToken, "⛔ 権限がありません");
+        continue;
+      }
+
+      const parts = text.split(" ");
+      const targets = parts
+        .slice(1)
+        .map(n => parseInt(n, 10) - 1)
+        .filter(i => !isNaN(i));
+
+      const list = history.get(chatId) || [];
+      targets.forEach(i => {
+        const tid = list[i];
+        if (tid && users.has(tid)) {
+          users.get(tid).muteUntil = 0;
+        }
+      });
+
+      await reply(e.replyToken, `🔊 ${targets.length}人を解除しました`);
+      continue;
+    }
+
+    /* ===== ミュート中チェック ===== */
+    const user = users.get(userId);
+    if (user.muteUntil > now) {
+      await reply(e.replyToken, "🔇 現在ミュート中です");
+      continue;
+    }
+
+    /* ===== 発言履歴更新 ===== */
+    if (!history.has(chatId)) history.set(chatId, []);
+    const list = history.get(chatId);
+
+    // 重複防止
+    const idx = list.indexOf(userId);
+    if (idx !== -1) list.splice(idx, 1);
+
+    list.unshift(userId);
+    if (list.length > MAX_HISTORY) list.pop();
+  }
+
+  res.sendStatus(200);
+});
+
+app.listen(3000);
