@@ -1,6 +1,0 @@
-name = "one-night-werewolf-linebot"
-main = "worker.js"
-compatibility_date = "2024-12-01"
-
-[vars]
-# 本番では wrangler secret で入れる
