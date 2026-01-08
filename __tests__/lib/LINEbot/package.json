@@ -1,5 +1,5 @@
 {
-      "name": "line-group-bot",
+      "name": "line-oc-bot",
         "version": "1.0.0",
           "type": "module",
             "main": "index.js",
@@ -7,6 +7,9 @@
                   "start": "node index.js"
                     },
                       "dependencies": {
-                          "express": "^4.18.2"
-                            }
-                            }
+                          "express": "^4.18.2",
+                              "node-fetch": "^3.3.2"
+                                }
+                                }
+
+                    
